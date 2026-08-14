@@ -46,6 +46,17 @@ def doctor():
     else:
         print("\n[OK] Required environment variables set")
 
+    telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    telegram_chat = os.environ.get("TELEGRAM_CHAT_ID")
+    telegram_enabled = os.environ.get("TELEGRAM_ENABLED", "true").lower() == "true"
+
+    if not telegram_enabled:
+        print("\n[SKIP] Telegram notifications disabled")
+    elif telegram_token and telegram_chat:
+        print("\n[OK] Telegram notifications configured")
+    else:
+        print("\n[SKIP] Telegram notifications not configured (optional)")
+
     use_public = os.environ.get("USE_PUBLIC_URL", "false").lower() == "true"
     print(f"\nDatabase URL mode : {'public' if use_public else 'private'}")
 
@@ -76,6 +87,9 @@ def config_show():
         "R2_ENDPOINT": os.environ.get("R2_ENDPOINT", ""),
         "R2_ACCESS_KEY": mask(os.environ.get("R2_ACCESS_KEY")),
         "R2_SECRET_KEY": mask(os.environ.get("R2_SECRET_KEY")),
+        "TELEGRAM_ENABLED": os.environ.get("TELEGRAM_ENABLED", "true"),
+        "TELEGRAM_BOT_TOKEN": mask(os.environ.get("TELEGRAM_BOT_TOKEN")),
+        "TELEGRAM_CHAT_ID": os.environ.get("TELEGRAM_CHAT_ID", ""),
     }
 
     for k, v in config.items():

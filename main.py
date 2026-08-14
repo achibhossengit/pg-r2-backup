@@ -9,7 +9,11 @@ import time
 import schedule
 import py7zr
 import shutil
-import sys 
+import sys
+import json
+import urllib.error
+import urllib.request
+from urllib.parse import unquote, urlparse
 
 load_dotenv(find_dotenv(usecwd=True), override=True)
 
@@ -55,10 +59,73 @@ def get_database_url():
         raise ValueError("[ERROR] DATABASE_URL not set!")
     return DATABASE_URL
 
+def get_database_name(database_url):
+    if not database_url:
+        return None
+    name = urlparse(database_url).path.lstrip("/").split("/")[0]
+    return unquote(name) if name else None
+
+def notify_backup_result(success, bucket=None, size_bytes=None, database_name=None):
+    enabled = os.environ.get("TELEGRAM_ENABLED", "true").lower() == "true"
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
+    if not enabled or not token or not chat_id:
+        return False
+
+    if success:
+        if size_bytes is None:
+            size_label = "unknown"
+        elif size_bytes < 1024:
+            size_label = f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            size_label = f"{size_bytes / 1024:.2f} KB"
+        else:
+            size_label = f"{size_bytes / 1024 / 1024:.2f} MB"
+
+        text = (
+            "✅ PostgreSQL backup success:\n"
+            f"Database: {database_name or 'unknown'}\n"
+            f"Storage: {bucket or 'storage'}\n"
+            f"File size: {size_label}"
+        )
+    else:
+        text = "❌ PostgreSQL backup failed."
+
+    payload = json.dumps(
+        {
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": True,
+        }
+    ).encode("utf-8")
+
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            if 200 <= response.status < 300:
+                log("[INFO] Telegram notification sent")
+                return True
+            log(f"[WARNING] Telegram API returned HTTP {response.status}")
+            return False
+    except Exception as exc:
+        log(f"[WARNING] Telegram notification failed: {exc}")
+        return False
+
 def run_backup():
     success = True
+    compressed_file = None
+    compressed_file_r2 = None
+
     if shutil.which("pg_dump") is None:
         log("[ERROR] pg_dump not found. Install postgresql-client.")
+        notify_backup_result(False)
         return False
 
     database_url = get_database_url()
@@ -183,6 +250,7 @@ def run_backup():
 
     except subprocess.CalledProcessError as e:
         log(f"[ERROR] Backup creation failed: {e}")
+        notify_backup_result(False)
         return False
     finally:
 
@@ -302,6 +370,7 @@ def run_backup():
     except Exception as e:
 
         log(f"[ERROR] R2 operation failed: {e}")
+        notify_backup_result(False)
         return False
     finally:
         if (compressed_file and os.path.exists(compressed_file)
@@ -313,7 +382,13 @@ def run_backup():
             else:
                 os.remove(compressed_file)
                 log("[INFO] Local backup deleted")
-                              
+
+    notify_backup_result(
+        True,
+        bucket=R2_BUCKET_NAME,
+        size_bytes=local_size,
+        database_name=get_database_name(database_url),
+    )
     return success
 
 if __name__ == "__main__":
