@@ -65,7 +65,22 @@ def get_database_name(database_url):
     name = urlparse(database_url).path.lstrip("/").split("/")[0]
     return unquote(name) if name else None
 
-def notify_backup_result(success, bucket=None, size_bytes=None, database_name=None):
+def format_file_size(size_bytes):
+    if size_bytes is None:
+        return "unknown"
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.2f} KB"
+    return f"{size_bytes / 1024 / 1024:.2f} MB"
+
+def notify_backup_result(
+    success,
+    bucket=None,
+    size_bytes=None,
+    database_name=None,
+    stage=None,
+):
     enabled = os.environ.get("TELEGRAM_ENABLED", "true").lower() == "true"
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -73,24 +88,21 @@ def notify_backup_result(success, bucket=None, size_bytes=None, database_name=No
     if not enabled or not token or not chat_id:
         return False
 
-    if success:
-        if size_bytes is None:
-            size_label = "unknown"
-        elif size_bytes < 1024:
-            size_label = f"{size_bytes} B"
-        elif size_bytes < 1024 * 1024:
-            size_label = f"{size_bytes / 1024:.2f} KB"
-        else:
-            size_label = f"{size_bytes / 1024 / 1024:.2f} MB"
+    details = (
+        f"Database: {database_name or 'unknown'}\n"
+        f"Storage: {bucket or 'storage'}\n"
+        f"File size: {format_file_size(size_bytes)}"
+    )
 
-        text = (
-            "✅ PostgreSQL backup success:\n"
-            f"Database: {database_name or 'unknown'}\n"
-            f"Storage: {bucket or 'storage'}\n"
-            f"File size: {size_label}"
-        )
+    if success:
+        text = "✅ PostgreSQL backup success:\n" + details
     else:
-        text = "❌ PostgreSQL backup failed."
+        where = "Cloudflare" if stage == "cloudflare" else "Database"
+        text = (
+            "❌ PostgreSQL backup failed:\n"
+            f"Reason: {where}\n"
+            + details
+        )
 
     payload = json.dumps(
         {
@@ -122,10 +134,17 @@ def run_backup():
     success = True
     compressed_file = None
     compressed_file_r2 = None
+    dump_size = None
+    database_url = None
 
     if shutil.which("pg_dump") is None:
         log("[ERROR] pg_dump not found. Install postgresql-client.")
-        notify_backup_result(False)
+        notify_backup_result(
+            False,
+            bucket=R2_BUCKET_NAME,
+            database_name=get_database_name(DATABASE_URL or DATABASE_PUBLIC_URL),
+            stage="database",
+        )
         return False
 
     database_url = get_database_url()
@@ -250,7 +269,15 @@ def run_backup():
 
     except subprocess.CalledProcessError as e:
         log(f"[ERROR] Backup creation failed: {e}")
-        notify_backup_result(False)
+        if compressed_file and os.path.exists(compressed_file):
+            dump_size = os.path.getsize(compressed_file)
+        notify_backup_result(
+            False,
+            bucket=R2_BUCKET_NAME,
+            size_bytes=dump_size,
+            database_name=get_database_name(database_url),
+            stage="database",
+        )
         return False
     finally:
 
@@ -266,11 +293,11 @@ def run_backup():
     #
     if compressed_file and os.path.exists(compressed_file):
 
-        size = os.path.getsize(compressed_file)
+        dump_size = os.path.getsize(compressed_file)
 
         log(
             f"[INFO] Final backup size: "
-            f"{size / 1024 / 1024:.2f} MB"
+            f"{dump_size / 1024 / 1024:.2f} MB"
         )
 
     #
@@ -370,7 +397,13 @@ def run_backup():
     except Exception as e:
 
         log(f"[ERROR] R2 operation failed: {e}")
-        notify_backup_result(False)
+        notify_backup_result(
+            False,
+            bucket=R2_BUCKET_NAME,
+            size_bytes=dump_size,
+            database_name=get_database_name(database_url),
+            stage="cloudflare",
+        )
         return False
     finally:
         if (compressed_file and os.path.exists(compressed_file)
